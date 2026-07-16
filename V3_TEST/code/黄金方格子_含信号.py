@@ -29,10 +29,8 @@
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MatplotlibPolygon
-from matplotlib.ticker import FuncFormatter
-from matplotlib.lines import Line2D
+import plotly.graph_objects as go
+import plotly.io as pio
 from shapely.geometry import LineString, Polygon as ShapelyPolygon, Point
 from shapely.ops import polygonize, unary_union
 from datetime import datetime
@@ -43,9 +41,6 @@ from collections import Counter
 warnings.filterwarnings('ignore')
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
-plt.rcParams['axes.unicode_minus'] = False
 
 # ========== 导入自建模块 ==========
 from golden_grid import build_gann_grid_cells, grid_date_to_x, grid_x_to_date
@@ -162,11 +157,10 @@ print(f"  最高触发次数: {max_trigger}")
 
 
 # ============================================================
-# 8. 渲染图表
+# 8. 渲染图表 (Plotly 交互式)
 # ============================================================
-print("  渲染图表...")
-fig, ax = plt.subplots(figsize=(44, 15))
-fig.canvas.manager.set_window_title('黄金方格子 × V3_TEST 信号捕捉器 2.0 — 全视觉集成')
+print("  渲染图表 (Plotly 交互式)...")
+fig = go.Figure()
 
 # 视野范围
 view_min_x = df['x'].min() - 5
@@ -177,16 +171,14 @@ view_max_y = df['high'].max() + 800
 view_box = ShapelyPolygon([(view_min_x, view_min_y), (view_max_x, view_min_y),
                            (view_max_x, view_max_y), (view_min_x, view_max_y)])
 
-# ---- 8a. 波动率体制背景 (新增) ----
+# ---- 8a. 波动率体制背景 ----
 print("  绘制波动率体制背景...")
-regime_colors = {
-    '高波动': '#FFE0E0',
-    '中等波动': '#FFFFE0',
-    '低波动': '#E0FFE0',
+regime_colors_map = {
+    '高波动': 'rgba(255,224,224,0.12)',
+    '中等波动': 'rgba(255,255,224,0.12)',
+    '低波动': 'rgba(224,255,224,0.12)',
 }
-regime_alpha = 0.12
 
-# 每隔20个交易日绘制一个体制色带
 step = 20
 for i in range(0, len(df) - 1, step):
     idx_start = df.index[i]
@@ -195,12 +187,13 @@ for i in range(0, len(df) - 1, step):
     x_end = (idx_end - GRID_A_DATE).days / 7.0
     hp = df.loc[idx_start, 'HV20_perc']
     if hp > 0.67:
-        color = regime_colors['高波动']
+        color = regime_colors_map['高波动']
     elif hp < 0.33:
-        color = regime_colors['低波动']
+        color = regime_colors_map['低波动']
     else:
-        color = regime_colors['中等波动']
-    ax.axvspan(x_start, x_end, alpha=regime_alpha, color=color, zorder=0)
+        color = regime_colors_map['中等波动']
+    fig.add_vrect(x0=x_start, x1=x_end, fillcolor=color,
+                  line_width=0, layer='below')
 
 # ---- 8b. 绘制江恩线 ----
 print("  绘制江恩线...")
@@ -212,32 +205,48 @@ scale_AB = abs(y_B - y_A) / abs(x_B - x_A)
 scale_BC = abs(y_C - y_B) / abs(x_C - x_B)
 
 future_x = df['x'].max() + 500
+gann_lines_x, gann_lines_y = [], []
 for m in GANN_MULTIPLIERS:
     line_up = LineString([(x_A, y_A), (future_x, y_A + scale_AB * m * (future_x - x_A))])
     if line_up.intersects(view_box):
-        x, y = line_up.xy
-        ax.plot(x, y, color='blue', alpha=0.25, linewidth=0.8, zorder=1)
+        gx, gy = line_up.xy
+        gann_lines_x += list(gx) + [None]
+        gann_lines_y += list(gy) + [None]
     line_down = LineString([(x_B, y_B), (future_x, y_B - scale_BC * m * (future_x - x_B))])
     if line_down.intersects(view_box):
-        x, y = line_down.xy
-        ax.plot(x, y, color='blue', alpha=0.25, linewidth=0.8, zorder=1)
+        gx, gy = line_down.xy
+        gann_lines_x += list(gx) + [None]
+        gann_lines_y += list(gy) + [None]
 
-# ---- 8c. 绘制网格格子（触发次数越多的格子越不透明） ----
+fig.add_trace(go.Scatter(
+    x=gann_lines_x, y=gann_lines_y, mode='lines',
+    line=dict(color='blue', width=0.8),
+    opacity=0.25, showlegend=False, hoverinfo='skip'
+))
+
+# ---- 8c. 绘制网格格子 ----
 print("  绘制网格格子...")
+untriggered_x, untriggered_y = [], []
 for i, cell in enumerate(cells):
     min_x_b, min_y_b, max_x_b, max_y_b = cell["polygon"].bounds
     if max_x_b < view_min_x or min_x_b > view_max_x or max_y_b < view_min_y or min_y_b > view_max_y:
         continue
 
-    x, y = cell["polygon"].exterior.xy
+    px, py = cell["polygon"].exterior.xy
+    x_poly = list(px) + [None]
+    y_poly = list(py) + [None]
+
     if i in triggered_polygons:
-        # 触发次数 → 透明度（0.10 ~ 0.40）
         n_trig = cell_trigger_count.get(i, 1)
         alpha_val = 0.10 + 0.30 * min(n_trig / max_trigger, 1.0)
-        ax.add_patch(MatplotlibPolygon(list(zip(x, y)), closed=True,
-                                       alpha=alpha_val, facecolor='purple',
-                                       edgecolor='purple', linewidth=1.5, zorder=3))
-        # 绘制Fib线
+        fig.add_trace(go.Scatter(
+            x=list(px), y=list(py),
+            fill="toself",
+            fillcolor=f'rgba(128,0,128,{alpha_val:.2f})',
+            mode='lines',
+            line=dict(color='purple', width=1.5),
+            showlegend=False, hoverinfo='skip'
+        ))
         for ratio in FIB_RATIOS:
             fib_y = min_y_b + (max_y_b - min_y_b) * ratio
             fib_line = LineString([(min_x_b - 100, fib_y), (max_x_b + 100, fib_y)])
@@ -247,46 +256,76 @@ for i, cell in enumerate(cells):
             segments = [clipped] if clipped.geom_type == 'LineString' else list(clipped.geoms)
             for seg in segments:
                 cx, cy = seg.xy
-                # Fib线根据比率不同颜色深浅
                 if ratio in (0.382, 0.618):
-                    ax.plot(cx, cy, color='darkorange', linestyle='--', linewidth=2.0, zorder=4)
-                    ax.text(cx[0] + 2, cy[0] + 30, f"Fib-{ratio}", color='darkorange',
-                            fontsize=8, zorder=5)
+                    fig.add_trace(go.Scatter(
+                        x=list(cx), y=list(cy), mode='lines',
+                        line=dict(color='darkorange', width=2, dash='dash'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+                    fig.add_annotation(
+                        x=cx[0] + 2, y=cy[0] + 30,
+                        text=f"Fib-{ratio}", font=dict(color='darkorange', size=10),
+                        showarrow=False
+                    )
                 elif ratio in (0.236, 0.764):
-                    ax.plot(cx, cy, color='orange', linestyle=':', linewidth=1.2, zorder=4)
-                else:  # 0.5
-                    ax.plot(cx, cy, color='gold', linestyle='-.', linewidth=1.0, zorder=4)
+                    fig.add_trace(go.Scatter(
+                        x=list(cx), y=list(cy), mode='lines',
+                        line=dict(color='orange', width=1.2, dash='dot'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=list(cx), y=list(cy), mode='lines',
+                        line=dict(color='gold', width=1, dash='dashdot'),
+                        showlegend=False, hoverinfo='skip'
+                    ))
     else:
-        ax.plot(x, y, color='gray', linestyle='-', linewidth=0.3, alpha=0.3, zorder=2)
+        untriggered_x += x_poly
+        untriggered_y += y_poly
+
+if untriggered_x:
+    fig.add_trace(go.Scatter(
+        x=untriggered_x, y=untriggered_y, mode='lines',
+        line=dict(color='rgba(128,128,128,0.3)', width=0.3),
+        showlegend=False, hoverinfo='skip'
+    ))
 
 # ---- 8d. 绘制日线K线 ----
 print("  绘制K线...")
 up = df['close'] >= df['open']
 down = df['close'] < df['open']
 
-ax.vlines(df['x'][up], df['low'][up], df['high'][up],
-          color='#ff3333', linewidth=0.6, zorder=6)
-ax.vlines(df['x'][down], df['low'][down], df['high'][down],
-          color='#00b300', linewidth=0.6, zorder=6)
-ax.bar(df['x'][up], df['close'][up] - df['open'][up],
-       bottom=df['open'][up], color='#ff3333', edgecolor='#ff3333',
-       width=0.11, zorder=6)
-ax.bar(df['x'][down], df['open'][down] - df['close'][down],
-       bottom=df['close'][down], color='#00b300', edgecolor='#00b300',
-       width=0.11, zorder=6)
+for mask, c in [(up, '#ff3333'), (down, '#00b300')]:
+    sub = df[mask]
+    hl_x, hl_y = [], []
+    body_x, body_y = [], []
+    for _, r in sub.iterrows():
+        hl_x += [r['x'], r['x'], None]
+        hl_y += [r['low'], r['high'], None]
+        body_x += [r['x'], r['x'], None]
+        body_y += [r['open'], r['close'], None]
+    fig.add_trace(go.Scatter(
+        x=hl_x, y=hl_y, mode='lines',
+        line=dict(color=c, width=0.5),
+        showlegend=False, hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=body_x, y=body_y, mode='lines',
+        line=dict(color=c, width=3),
+        showlegend=False, hoverinfo='skip'
+    ))
 
-# ---- 8e. 绘制7种信号（含网格上下文标注） ----
+# ---- 8e. 绘制7种信号 ----
 print("  绘制信号 (7种类型 + 网格位置)...")
 
-# 信号配置：列名, 颜色, 标记, 基础大小, 标签, 垂直偏移
 SIGNAL_PLOT_CONFIG = [
-    ('Long_Strong',       'red',     '^', 200, '做多★★★[深V]', -200),
-    ('Long_Weak',         'green',   '^',  80, '做多★[双冰]',  -150),
-    ('Short_Breakdown',   'darkred', 'v', 200, '做空★★★[波动加速]', 200),
-    ('Short_Strong',      '#CC0000', 'v', 150, '做空★★★[风暴眼·连续]', 180),
-    ('Short_LowVol',      'purple',  'v', 120, '做空★★[低波做空]', 150),
-    ('Short_Extended',    'orange',  'v', 100, '做空★★[扩展风暴眼]', 150),
-    ('Short_Weak',        'gold',    'v',  70, '做空★[风暴眼·首日]', 120),
+    ('Long_Strong',       'red',     'triangle-up',   10, '做多★★★[深V]', -200),
+    ('Long_Weak',         'green',   'triangle-up',    8, '做多★[双冰]',  -150),
+    ('Short_Breakdown',   'darkred', 'triangle-down', 10, '做空★★★[波动加速]', 200),
+    ('Short_Strong',      '#CC0000', 'triangle-down',  9, '做空★★★[风暴眼·连续]', 180),
+    ('Short_LowVol',      'purple',  'triangle-down',  8, '做空★★[低波做空]', 150),
+    ('Short_Extended',    'orange',  'triangle-down',  8, '做空★★[扩展风暴眼]', 150),
+    ('Short_Weak',        'gold',    'triangle-down',  7, '做空★[风暴眼·首日]', 120),
 ]
 
 for col_name, color, marker, base_size, label, y_offset in SIGNAL_PLOT_CONFIG:
@@ -294,12 +333,15 @@ for col_name, color, marker, base_size, label, y_offset in SIGNAL_PLOT_CONFIG:
     if len(subset) == 0:
         continue
 
+    sx, sy, sizes = [], [], []
+    label_x, label_y, label_texts, label_colors = [], [], [], []
+    bonus_x, bonus_y, bonus_texts, bonus_colors = [], [], [], []
+
     for _, row in subset.iterrows():
         x_pos = row['x']
         y_pos = row['close']
         score_abs = abs(row['Composite_Score'])
 
-        # 大小 = 基础大小 × 评分因子 (评分越高越大)
         if score_abs >= 4:
             size_factor = 1.3
         elif score_abs >= 2:
@@ -308,108 +350,138 @@ for col_name, color, marker, base_size, label, y_offset in SIGNAL_PLOT_CONFIG:
             size_factor = 0.7
         marker_size = base_size * size_factor
 
-        # 做多信号标在K线下方，做空标在上方
         draw_y = y_pos + y_offset * size_factor
+        sx.append(x_pos)
+        sy.append(draw_y)
+        sizes.append(marker_size * 1.5)
 
-        ax.scatter(x_pos, draw_y, marker=marker, color=color, s=marker_size,
-                   edgecolor='black', linewidth=0.5, zorder=10, alpha=0.9)
-
-        # ---- 网格位置标签 (格顶/格底 才标注) ----
         zone = row.get('Grid_Zone_Label', '')
         bonus = row.get('Grid_Score_Bonus', 0.0)
+
         if zone in ('格顶', '格底') and not pd.isna(row.get('Grid_Cell_Pos', np.nan)):
             pos_pct = int(row['Grid_Cell_Pos'] * 100)
-            label_text = f"{zone}({pos_pct}%)"
+            lt = f"{zone}({pos_pct}%)"
             if bonus != 0.0:
-                label_text += f" {'B' if bonus > 0 else 'P'}{bonus:+.1f}"
-            # 标签颜色与格子区域匹配
-            label_color = '#FF4444' if zone == '格顶' else '#44AA44'
-            ax.annotate(label_text, (x_pos, draw_y),
-                        xytext=(8, -8 if marker == '^' else 8),
-                        textcoords='offset points', fontsize=6,
-                        color=label_color, fontweight='bold',
-                        alpha=0.8, zorder=11)
+                lt += f" {'B' if bonus > 0 else 'P'}{bonus:+.1f}"
+            lc = '#FF4444' if zone == '格顶' else '#44AA44'
+            label_x.append(x_pos)
+            label_y.append(draw_y)
+            label_texts.append(lt)
+            label_colors.append(lc)
 
-        # ---- 网格加分标记 (Grid_Score_Bonus != 0) ----
         if bonus != 0.0:
             bonus_color = '#00AA00' if bonus > 0 else '#AA0000'
             bonus_sign = '+' if bonus > 0 else ''
-            ax.annotate(f"网格{bonus_sign}{bonus:.1f}", (x_pos, draw_y),
-                        xytext=(-5, -18 if marker == '^' else 18),
-                        textcoords='offset points', fontsize=5.5,
-                        color=bonus_color, fontweight='bold',
-                        alpha=0.9, zorder=11,
-                        bbox=dict(boxstyle='round,pad=0.1', facecolor='white',
-                                  edgecolor=bonus_color, alpha=0.7))
+            bonus_x.append(x_pos)
+            bonus_y.append(draw_y)
+            bonus_texts.append(f"网格{bonus_sign}{bonus:.1f}")
+            bonus_colors.append(bonus_color)
+
+    fig.add_trace(go.Scatter(
+        x=sx, y=sy, mode='markers',
+        marker=dict(
+            symbol=marker, size=sizes, color=color,
+            line=dict(color='black', width=0.5)
+        ),
+        opacity=0.9,
+        name=label,
+        hoverinfo='name'
+    ))
+
+    if label_x:
+        fig.add_trace(go.Scatter(
+            x=label_x, y=label_y, mode='text',
+            text=label_texts,
+            textfont=dict(color=label_colors, size=7, family='Arial Black'),
+            textposition='top center',
+            showlegend=False, hoverinfo='skip'
+        ))
+
+    if bonus_x:
+        fig.add_trace(go.Scatter(
+            x=bonus_x, y=bonus_y, mode='text',
+            text=bonus_texts,
+            textfont=dict(color=bonus_colors, size=6),
+            textposition='bottom center',
+            showlegend=False, hoverinfo='skip'
+        ))
 
 # ---- 8f. 锚点标注 ----
+anchor_x, anchor_y, anchor_texts = [], [], []
 for label_key, (date_str, price) in GRID_ANCHORS.items():
     x_anchor = grid_date_to_x(date_str)
-    ax.scatter(x_anchor, price, marker='s', color='blue', s=100, zorder=12)
-    ax.annotate(f"锚点{label_key}\n{date_str}\n{price}", (x_anchor, price),
-                xytext=(10, 10), textcoords='offset points', fontsize=9,
-                color='blue', fontweight='bold', zorder=12,
-                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    anchor_x.append(x_anchor)
+    anchor_y.append(price)
+    anchor_texts.append(f"锚点{label_key}<br>{date_str}<br>{price}")
 
-# ---- 8g. 图例（完整7种信号 + 网格元素） ----
-legend_elements = [
-    # 信号图例
-    Line2D([0], [0], marker='^', color='w', markerfacecolor='red', markersize=15, label='做多★★★ [深V反包]'),
-    Line2D([0], [0], marker='^', color='w', markerfacecolor='green', markersize=12, label='做多★ [双冰点]'),
-    Line2D([0], [0], marker='v', color='w', markerfacecolor='darkred', markersize=15, label='做空★★★ [波动加速]'),
-    Line2D([0], [0], marker='v', color='w', markerfacecolor='#CC0000', markersize=13, label='做空★★★ [风暴眼·连续]'),
-    Line2D([0], [0], marker='v', color='w', markerfacecolor='purple', markersize=12, label='做空★★ [低波做空]'),
-    Line2D([0], [0], marker='v', color='w', markerfacecolor='orange', markersize=11, label='做空★★ [扩展风暴眼]'),
-    Line2D([0], [0], marker='v', color='w', markerfacecolor='gold', markersize=9, label='做空★ [风暴眼·首日]'),
-    # 网格图例
-    Line2D([0], [0], color='purple', linewidth=3, label='已触发格子(深浅=触发次数)'),
-    Line2D([0], [0], color='gray', linewidth=1, label='未触发格子'),
-    Line2D([0], [0], color='darkorange', linestyle='--', linewidth=2, label='Fib-0.382/0.618'),
-    Line2D([0], [0], color='orange', linestyle=':', linewidth=1.5, label='Fib-0.236/0.764'),
-    Line2D([0], [0], color='gold', linestyle='-.', linewidth=1, label='Fib-0.5'),
-    # 体制图例
-    Line2D([0], [0], color='#FFE0E0', linewidth=4, label='高波动区', alpha=0.5),
-    Line2D([0], [0], color='#E0FFE0', linewidth=4, label='低波动区', alpha=0.5),
-    # 区域标签图例
-    Line2D([0], [0], marker='s', color='w', markerfacecolor='#FF4444', markersize=8, label='格顶(阻力位)'),
-    Line2D([0], [0], marker='s', color='w', markerfacecolor='#44AA44', markersize=8, label='格底(支撑位)'),
-]
-ax.legend(handles=legend_elements, loc='upper left', fontsize=8, ncol=2,
-          framealpha=0.9, edgecolor='gray')
+fig.add_trace(go.Scatter(
+    x=anchor_x, y=anchor_y, mode='markers+text',
+    marker=dict(symbol='square', color='blue', size=10),
+    text=anchor_texts,
+    textposition='top center',
+    textfont=dict(color='blue', size=10, family='Arial Black'),
+    name='锚点',
+    hoverinfo='text'
+))
 
-# ---- 8h. 坐标轴格式化 ----
-def format_date(x, pos=None):
-    target_date = GRID_A_DATE + pd.Timedelta(days=x * 7)
-    return target_date.strftime('%Y-%m-%d')
-
-ax.xaxis.set_major_formatter(FuncFormatter(format_date))
-plt.xticks(rotation=45, fontsize=8)
-
-ax.set_xlim(view_min_x, view_max_x)
-ax.set_ylim(view_min_y, view_max_y)
+# ---- 8g. 坐标轴 & 布局 ----
+year_step = 52
+tick_x = np.arange(0, view_max_x, year_step)
+tick_text = []
+for tx in tick_x:
+    d = GRID_A_DATE + pd.Timedelta(days=tx * 7)
+    tick_text.append(d.strftime('%Y-%m-%d'))
 
 today_str = datetime.now().strftime('%Y-%m-%d')
-ax.set_title(f"中证1000 黄金方格子 × V3_TEST 信号捕捉器 2.0（全视觉集成·数据至{today_str}）",
-             fontsize=20, fontweight='bold')
-ax.set_ylabel("指数点位", fontsize=12)
-ax.set_xlabel("日期 (周)", fontsize=12)
+fig.update_layout(
+    title=dict(
+        text=f"中证1000 黄金方格子 × V3_TEST 信号捕捉器 2.0（全视觉集成·数据至{today_str}）",
+        font=dict(size=20)
+    ),
+    xaxis=dict(
+        range=[view_min_x, view_max_x],
+        tickvals=tick_x,
+        ticktext=tick_text,
+        tickangle=45,
+        title=dict(text="日期 (周)", font=dict(size=12))
+    ),
+    yaxis=dict(
+        range=[view_min_y, view_max_y],
+        title=dict(text="指数点位", font=dict(size=12))
+    ),
+    height=700,
+    hovermode='closest',
+    showlegend=True,
+    legend=dict(
+        x=0, y=1, font=dict(size=9),
+        bgcolor='rgba(255,255,255,0.9)',
+        bordercolor='gray',
+        borderwidth=1
+    ),
+    margin=dict(l=50, r=30, t=50, b=50)
+)
 
-# ---- 8i. 添加网格位置统计信息到图表左下角 ----
+# ---- 8h. 统计信息 ----
 stats_text = (
-    f"信号统计: 共{n_signals}条\n"
-    f"  网格加分调整: {(signals_df['Grid_Score_Bonus'] != 0).sum()}条\n"
-    f"  格顶信号: {(signals_df['Grid_Zone_Label'] == '格顶').sum()}条\n"
-    f"  格底信号: {(signals_df['Grid_Zone_Label'] == '格底').sum()}条\n"
-    f"  格中信号: {(signals_df['Grid_Zone_Label'] == '格中').sum()}条\n"
+    f"信号统计: 共{n_signals}条<br>"
+    f"网格加分调整: {(signals_df['Grid_Score_Bonus'] != 0).sum()}条<br>"
+    f"格顶信号: {(signals_df['Grid_Zone_Label'] == '格顶').sum()}条<br>"
+    f"格底信号: {(signals_df['Grid_Zone_Label'] == '格底').sum()}条<br>"
+    f"格中信号: {(signals_df['Grid_Zone_Label'] == '格中').sum()}条<br>"
     f"当前体制: {ctx['current_regime']} (HV20%: {ctx['current_hv20_percentile']:.0f}%)"
 )
-ax.text(0.01, 0.01, stats_text, transform=ax.transAxes, fontsize=9,
-        verticalalignment='bottom', horizontalalignment='left',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'),
-        zorder=20)
+fig.add_annotation(
+    x=0.01, y=0.01, xref='paper', yref='paper',
+    text=stats_text, showarrow=False,
+    align='left', font=dict(size=10),
+    bgcolor='rgba(255,255,255,0.8)',
+    bordercolor='gray', borderwidth=1
+)
 
-plt.tight_layout()
-plt.show()
+# ---- 自动保存HTML ----
+output_path = '黄金方格子_含信号.html'
+pio.write_html(fig, file=output_path, auto_open=True)
+print(f"  ✅ 图表已保存至: {output_path}")
 
 print(f"\n{'='*70}")
 print(f"  ✅ 完成! 共 {n_signals} 个信号动态绘制在黄金方格子上。")
